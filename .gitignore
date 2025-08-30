@@ -1,0 +1,49 @@
+# Entornos virtuales
+venv/
+ENV/
+.env/
+.venv/
+
+# Archivos de dependencias creados automáticamente
+*.pyc
+*.pyo
+*.pyd
+__pycache__/
+*.so
+
+# Archivos de logs y bases de datos temporales
+*.log
+*.sqlite3
+db.sqlite3
+
+# Archivos de configuración locales
+*.env
+.env.*
+
+# Configuración de IDEs/editores
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Archivos de sistema
+.DS_Store
+Thumbs.db
+
+# Cobertura de pruebas
+htmlcov/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+*.hypothesis/
+.pytest_cache/
+
+# Build / distribuciones
+build/
+dist/
+eggs/
+*.egg-info/
