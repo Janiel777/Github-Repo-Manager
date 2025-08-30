@@ -10,14 +10,29 @@ GH_WEBHOOK_SECRET = os.environ.get("GH_WEBHOOK_SECRET", "").encode()
 app = Flask(__name__)
 
 def verify_signature(raw_body: bytes, signature_header: str):
-    """Valida la firma HMAC del webhook (X-Hub-Signature-256)."""
+    """
+    Valida la firma HMAC del webhook (X-Hub-Signature-256).
+    Espera formato: 'sha256=<hexdigest>'
+    """
     if not GH_WEBHOOK_SECRET:
         abort(500, "Falta GH_WEBHOOK_SECRET en variables de entorno")
     if not signature_header:
         abort(401, "Falta X-Hub-Signature-256")
-    mac = hmac.new(GH_WEBHOOK_SECRET, msg=raw_body, digestmod=hashlib.sha256)
-    expected = "sha256=" + mac.hexdigest()
-    if not hmac.compare_digest(expected, signature_header):
+
+    try:
+        scheme, received_sig = signature_header.split("=", 1)
+    except ValueError:
+        abort(401, "Formato de firma inválido")
+
+    if scheme.lower() != "sha256":
+        abort(401, "Esquema de firma no soportado (se esperaba sha256)")
+
+    computed_sig = hmac.new(GH_WEBHOOK_SECRET, msg=raw_body, digestmod=hashlib.sha256).hexdigest()
+
+    # 🔍 Log de depuración seguro (recorta para no exponer)
+    print(f"[sig] recv={received_sig[:10]}… len={len(received_sig)}  comp={computed_sig[:10]}… len={len(computed_sig)}")
+
+    if not hmac.compare_digest(received_sig, computed_sig):
         abort(401, "Firma inválida")
 
 def extract_owner_repo(payload):
@@ -38,7 +53,17 @@ def home():
 @app.post("/webhook")
 def webhook():
     raw = request.get_data()
-    verify_signature(raw, request.headers.get("X-Hub-Signature-256",""))
+
+    # 🔧 2) si falta el header 256, corta con 401 claro
+    sig256 = request.headers.get("X-Hub-Signature-256")
+    if not sig256:
+        # (Opcional) avisa si llegó el header viejo sha1 para diagnosticar:
+        if request.headers.get("X-Hub-Signature"):
+            print("[warn] Llegó X-Hub-Signature (sha1) en vez de X-Hub-Signature-256")
+        abort(401, "Falta X-Hub-Signature-256")
+
+    verify_signature(raw, sig256)
+
     event = request.headers.get("X-GitHub-Event", "unknown")
     payload = request.get_json(silent=True) or json.loads(raw.decode("utf-8"))
 
@@ -47,12 +72,11 @@ def webhook():
 
     owner, repo = extract_owner_repo(payload)
     if ALLOWED_OWNERS and owner not in ALLOWED_OWNERS:
-        # Silenciosamente ignoramos eventos de cuentas no permitidas
         return ("", 204)
 
-    # ... aquí tu lógica real para eventos permitidos ...
     print(f"[webhook] {event} from {owner}/{repo}")
     return jsonify({"ok": True}), 200
+
 
 if __name__ == "__main__":
     # Para correr local (en prod Heroku usa gunicorn del Procfile)
