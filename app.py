@@ -1,6 +1,9 @@
 import os, hmac, hashlib, json
 from flask import Flask, request, abort, jsonify
 
+ALLOWED_OWNERS = {s.strip() for s in os.environ.get("ALLOWED_OWNERS", "").split(",") if s.strip()}
+# ej: ALLOWED_OWNERS="Janiel777,mi-organizacion"
+
 # Variables de entorno (pon GH_WEBHOOK_SECRET en Heroku)
 GH_WEBHOOK_SECRET = os.environ.get("GH_WEBHOOK_SECRET", "").encode()
 
@@ -17,33 +20,39 @@ def verify_signature(raw_body: bytes, signature_header: str):
     if not hmac.compare_digest(expected, signature_header):
         abort(401, "Firma inválida")
 
+def extract_owner_repo(payload):
+    owner = None; repo = None
+    if payload.get("repository"):
+        owner = payload["repository"]["owner"]["login"]
+        repo  = payload["repository"]["name"]
+    elif payload.get("organization"):
+        owner = payload["organization"]["login"]
+    elif payload.get("installation", {}).get("account"):
+        owner = payload["installation"]["account"]["login"]
+    return owner, repo
+
 @app.get("/")
 def home():
     return "GitHub App running ✅"
 
 @app.post("/webhook")
 def webhook():
-    # 1) validar firma
     raw = request.get_data()
-    signature = request.headers.get("X-Hub-Signature-256", "")
-    verify_signature(raw, signature)
-
-    # 2) leer evento y payload
+    verify_signature(raw, request.headers.get("X-Hub-Signature-256",""))
     event = request.headers.get("X-GitHub-Event", "unknown")
-    try:
-        payload = request.get_json(silent=True) or json.loads(raw.decode("utf-8"))
-    except Exception:
-        payload = {}
+    payload = request.get_json(silent=True) or json.loads(raw.decode("utf-8"))
 
-    # 3) comportamiento mínimo
     if event == "ping":
-        # GitHub envía ping al registrar/actualizar la App
         return jsonify({"msg": "pong"}), 200
 
-    # Por ahora solo logueamos el nombre del evento
-    print(f"[webhook] event={event} delivery={request.headers.get('X-GitHub-Delivery')}")
+    owner, repo = extract_owner_repo(payload)
+    if ALLOWED_OWNERS and owner not in ALLOWED_OWNERS:
+        # Silenciosamente ignoramos eventos de cuentas no permitidas
+        return ("", 204)
 
-    return jsonify({"ok": True, "event": event}), 200
+    # ... aquí tu lógica real para eventos permitidos ...
+    print(f"[webhook] {event} from {owner}/{repo}")
+    return jsonify({"ok": True}), 200
 
 if __name__ == "__main__":
     # Para correr local (en prod Heroku usa gunicorn del Procfile)
