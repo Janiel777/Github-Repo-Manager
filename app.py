@@ -1,5 +1,6 @@
 import os, hmac, hashlib, json
 from flask import Flask, request, abort, jsonify
+import string
 
 DEBUG_SIG = os.environ.get("DEBUG_SIG", "0") == "1"  # pon DEBUG_SIG=1 en Heroku si quieres ver all
 ALLOWED_OWNERS = {s.strip() for s in os.environ.get("ALLOWED_OWNERS", "").split(",") if s.strip()}
@@ -9,6 +10,26 @@ ALLOWED_OWNERS = {s.strip() for s in os.environ.get("ALLOWED_OWNERS", "").split(
 GH_WEBHOOK_SECRET = os.environ.get("GH_WEBHOOK_SECRET", "").encode()
 
 app = Flask(__name__)
+
+def _debug_secret_and_alternates(raw_body: bytes, received_sig: str):
+    secret_str = os.environ.get("GH_WEBHOOK_SECRET", "")
+    # Muestra longitud y codepoints (detecta espacios invisibles/UTF-8 raros)
+    codepoints = [f"U+{ord(ch):04X}" for ch in secret_str]
+    print(f"[dbg] secret_len={len(secret_str)} codepoints={codepoints}")
+
+    # Firma “normal” con el secret como texto (lo que ya haces)
+    sig_txt = hmac.new(secret_str.encode(), raw_body, hashlib.sha256).hexdigest()
+    print(f"[dbg] computed_txt=sha256={sig_txt}")
+
+    # Si el secret parece hex válido, intenta también interpretarlo como bytes binarios del hex
+    if all(c in string.hexdigits for c in secret_str) and len(secret_str) % 2 == 0:
+        try:
+            sig_hexkey = hmac.new(bytes.fromhex(secret_str), raw_body, hashlib.sha256).hexdigest()
+            print(f"[dbg] computed_hexkey=sha256={sig_hexkey}")
+        except Exception as e:
+            print(f"[dbg] hexkey error: {e}")
+
+    print(f"[dbg] header_recv={received_sig}")
 
 def verify_signature(raw_body: bytes, signature_header: str):
     """
@@ -66,6 +87,7 @@ def home():
 
 @app.post("/webhook")
 def webhook():
+    # headers útiles para cruzar con "Recent deliveries" de la App
     print("[hdr] delivery=", request.headers.get("X-GitHub-Delivery"),
           "hook_id=", request.headers.get("X-GitHub-Hook-ID"),
           "target_type=", request.headers.get("X-GitHub-Hook-Installation-Target-Type"),
@@ -73,16 +95,28 @@ def webhook():
 
     raw = request.get_data()
 
-    # 🔧 2) si falta el header 256, corta con 401 claro
+    # 1) tomar y validar el header de firma
     sig256 = request.headers.get("X-Hub-Signature-256")
     if not sig256:
-        # (Opcional) avisa si llegó el header viejo sha1 para diagnosticar:
         if request.headers.get("X-Hub-Signature"):
             print("[warn] Llegó X-Hub-Signature (sha1) en vez de X-Hub-Signature-256")
         abort(401, "Falta X-Hub-Signature-256")
 
+    # 2) separar 'sha256=' del hash y depurar antes de verificar
+    try:
+        scheme, recv = sig256.split("=", 1)
+    except ValueError:
+        abort(401, "Formato de firma inválido")
+    if scheme.lower() != "sha256":
+        abort(401, "Esquema de firma no soportado (se esperaba sha256)")
+
+    if DEBUG_SIG:
+        _debug_secret_and_alternates(raw, recv)
+
+    # 3) verificación real (usa tu verify_signature existente)
     verify_signature(raw, sig256)
 
+    # 4) seguir con el manejo normal
     event = request.headers.get("X-GitHub-Event", "unknown")
     payload = request.get_json(silent=True) or json.loads(raw.decode("utf-8"))
 
