@@ -1,6 +1,7 @@
 import os, hmac, hashlib, json
 from flask import Flask, request, abort, jsonify
 
+DEBUG_SIG = os.environ.get("DEBUG_SIG", "0") == "1"  # pon DEBUG_SIG=1 en Heroku si quieres ver all
 ALLOWED_OWNERS = {s.strip() for s in os.environ.get("ALLOWED_OWNERS", "").split(",") if s.strip()}
 # ej: ALLOWED_OWNERS="Janiel777,mi-organizacion"
 
@@ -29,8 +30,21 @@ def verify_signature(raw_body: bytes, signature_header: str):
 
     computed_sig = hmac.new(GH_WEBHOOK_SECRET, msg=raw_body, digestmod=hashlib.sha256).hexdigest()
 
-    # 🔍 Log de depuración seguro (recorta para no exponer)
-    print(f"[sig] recv={received_sig[:10]}… len={len(received_sig)}  comp={computed_sig[:10]}… len={len(computed_sig)}")
+    # Logs de depuración (opcionales)
+    if DEBUG_SIG:
+        # Cabeceras útiles para cruzar en "Recent deliveries" de la App
+        print("[hdr] delivery=", request.headers.get("X-GitHub-Delivery"),
+              "event=", request.headers.get("X-GitHub-Event"),
+              "ua=", request.headers.get("User-Agent"),
+              "ct=", request.headers.get("Content-Type"),
+              "len=", len(raw_body))
+        # Muestra firmas completas (NO dejes esto siempre activo en prod)
+        print(f"[sig] header=sha256={received_sig}")
+        print(f"[sig] computed=sha256={computed_sig}")
+
+    else:
+        # Resumen seguro (solo prefijos) si no estás en debug
+        print(f"[sig] recv={received_sig[:10]}… len={len(received_sig)}  comp={computed_sig[:10]}… len={len(computed_sig)}")
 
     if not hmac.compare_digest(received_sig, computed_sig):
         abort(401, "Firma inválida")
