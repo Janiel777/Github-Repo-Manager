@@ -66,6 +66,11 @@ def home():
 
 @app.post("/webhook")
 def webhook():
+    print("[hdr] delivery=", request.headers.get("X-GitHub-Delivery"),
+          "hook_id=", request.headers.get("X-GitHub-Hook-ID"),
+          "target_type=", request.headers.get("X-GitHub-Hook-Installation-Target-Type"),
+          "event=", request.headers.get("X-GitHub-Event"))
+
     raw = request.get_data()
 
     # 🔧 2) si falta el header 256, corta con 401 claro
