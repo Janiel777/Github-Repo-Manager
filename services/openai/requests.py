@@ -74,14 +74,14 @@ def build_pr_prompt(
     """).strip()
 
     instrucciones = textwrap.dedent("""
-    Eres un revisor de código experto. Debes entregar **un solo bloque en Markdown** con estas secciones:
+    Eres un revisor de código experto. Entrega **un solo bloque Markdown** con:
 
-    1. **Resumen del PR**: qué se implementó/cambió exactamente, en lenguaje natural (2–6 bullets).
-    2. **Buenas prácticas** (checklist breve): documentación mínima, nombres claros, consistencia de estilo, manejo de errores, tests/tipo de cobertura si aplica. Indica ✔️/⚠️/❌ y ejemplos concretos.
-    3. **Revisión de lógica**: señala posibles errores, edge cases, regresiones y contratos rotos. Si todo luce correcto, explícalo.
-    4. **Acciones sugeridas** (bullets): pasos concretos para mejorar o validar (tests, refactors, validaciones, etc.).
-
-    Sé específico, cita rutas de archivo y fragmentos relevantes del diff. Evita divagar.
+    1. **Resumen del PR** …
+    2. **Buenas prácticas** …
+    3. **Revisión de lógica** …
+    4. **Acciones sugeridas** …
+    
+    Se critico en observar exposicion de secretos o variables de entorno. Ademas verifica la logica de funciones y algoritmos que esten correctas.
     """)
 
     return f"{instrucciones}\n\n---\n\n{pr_intro}"
