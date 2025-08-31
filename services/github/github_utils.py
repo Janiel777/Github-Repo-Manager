@@ -2,7 +2,7 @@
 
 def extract_owner_repo(payload: dict):
     """
-    Devuelve (owner, repo) si existe; si no hay repo (p. ej. eventos de instalación), devuelve (owner, None).
+    Devuelve (owner, repo) si existe; o (owner, None) si es un evento sin repo (p. ej. installation).
     """
     owner = None
     repo = None

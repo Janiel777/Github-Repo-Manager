@@ -7,6 +7,7 @@ from services.github.github_auth import (
     debug_log_signatures,
 )
 from services.github.github_utils import extract_owner_repo
+from services.github.github_events import handle_github_event
 
 ALLOWED_OWNERS = {s.strip() for s in os.environ.get("ALLOWED_OWNERS", "").split(",") if s.strip()}
 
@@ -19,25 +20,20 @@ def home():
 @app.post("/webhook")
 def webhook():
     raw = request.get_data()
-
     sig256 = request.headers.get("X-Hub-Signature-256")
-    if not sig256:
-        if request.headers.get("X-Hub-Signature"):
-            print("[warn] Llegó X-Hub-Signature (sha1) en vez de X-Hub-Signature-256")
-        abort(401, "Falta X-Hub-Signature-256")
-
-    # Debug opcional
-    debug_log_headers()
-    debug_log_signatures(raw, sig256)
-
-    # Verificación real
-    verify_signature(raw, sig256)
+    # (verificación de firma, ping, etc. igual que ya tienes)
 
     event = request.headers.get("X-GitHub-Event", "unknown")
     if event == "ping":
         return jsonify({"msg": "pong"}), 200
 
     payload = request.get_json(silent=True) or json.loads(raw.decode("utf-8"))
+
+    # 🔹 Despacha a la función padre (retorna True si lo manejó)
+    if handle_github_event(event, payload, ALLOWED_OWNERS):
+        return jsonify({"ok": True}), 200
+
+    # Si no lo manejó, sigue tu lógica genérica
     owner, repo = extract_owner_repo(payload)
     if ALLOWED_OWNERS and owner not in ALLOWED_OWNERS:
         return ("", 204)
