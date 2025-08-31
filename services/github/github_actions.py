@@ -2,7 +2,7 @@
 import time
 import logging
 import requests
-
+from typing import List, Dict, Tuple
 from .github_auth import get_installation_token, get_app_name
 
 API = "https://api.github.com"
@@ -197,3 +197,69 @@ def create_welcome_discussion(
         msg = f"Error creando discusión: {e}"
         logging.error("[welcome] %s/%s: %s", owner, repo, msg)
         return False, msg
+
+
+
+# =========================
+# Pull Requests (REST)
+# =========================
+def fetch_pr_files(owner: str, repo: str, number: int, token: str) -> List[Dict[str, str]]:
+    """
+    Devuelve [{filename, patch}] de /pulls/{number}/files (paginado).
+    """
+    items: List[Dict[str, str]] = []
+    page = 1
+    while True:
+        r = requests.get(
+            f"{API}/repos/{owner}/{repo}/pulls/{number}/files",
+            headers=_headers(token),
+            params={"per_page": 100, "page": page},
+            timeout=25,
+        )
+        r.raise_for_status()
+        batch = r.json()
+        for it in batch:
+            items.append({"filename": it["filename"], "patch": it.get("patch", "")})
+        if len(batch) < 100:
+            break
+        page += 1
+    return items
+
+def fetch_pr_commits(owner: str, repo: str, number: int, token: str) -> List[Dict[str, str]]:
+    """
+    Devuelve [{sha, message, author}]
+    """
+    items: List[Dict[str, str]] = []
+    page = 1
+    while True:
+        r = requests.get(
+            f"{API}/repos/{owner}/{repo}/pulls/{number}/commits",
+            headers=_headers(token),
+            params={"per_page": 100, "page": page},
+            timeout=25,
+        )
+        r.raise_for_status()
+        batch = r.json()
+        for it in batch:
+            items.append({
+                "sha": it.get("sha", ""),
+                "message": it.get("commit", {}).get("message", ""),
+                "author": (it.get("commit", {}).get("author", {}) or {}).get("name", ""),
+            })
+        if len(batch) < 100:
+            break
+        page += 1
+    return items
+
+def post_pr_comment(owner: str, repo: str, number: int, token: str, body_md: str) -> int:
+    """
+    Publica un comentario en el PR (endpoint de issues comments). Devuelve comment_id.
+    """
+    r = requests.post(
+        f"{API}/repos/{owner}/{repo}/issues/{number}/comments",
+        headers=_headers(token),
+        json={"body": body_md},
+        timeout=20,
+    )
+    r.raise_for_status()
+    return r.json()["id"]

@@ -5,9 +5,12 @@ import os
 import logging
 from typing import Iterable, Tuple, Optional, Set
 
-from .github_actions import create_welcome_discussion
+from .github_actions import create_welcome_discussion, fetch_pr_files, fetch_pr_commits, post_pr_comment
 
 __all__ = ["handle_github_event"]
+
+from .github_auth import get_installation_token
+from ..openai.requests import review_pull_request
 
 # Personalización opcional por env:
 # - APP_PUBLIC_NAME: sobrescribe el nombre mostrado en el título de la discusión
@@ -100,6 +103,61 @@ def _handle_installation_repositories_added(payload: dict, allowed_owners: Optio
     """installation_repositories.added → crea/asegura la Discussion en repos añadidos."""
     return _welcome_in_repos(payload, allowed_owners)
 
+# ---------- handler de PR ----------
+def _handle_pull_request(payload: dict, allowed_owners: Optional[Set[str]]) -> bool:
+    action = payload.get("action")
+    if action not in {"opened", "synchronize", "reopened", "ready_for_review"}:
+        return False  # no lo manejamos aquí
+
+    repo_info = payload.get("repository", {})
+    owner = repo_info.get("owner", {}).get("login")
+    repo  = repo_info.get("name")
+    if not _owner_permitido(owner, allowed_owners):
+        return True  # ignorado por policy
+
+    pr = payload.get("pull_request", {})
+    if pr.get("draft"):
+        return True  # ignorar borradores (ajústalo si quieres)
+
+    installation_id = payload.get("installation", {}).get("id")
+    if not installation_id:
+        logging.warning("[pr] sin installation.id")
+        return True
+
+    pr_number = pr.get("number")
+    pr_details = {
+        "number": pr_number,
+        "title": pr.get("title") or "",
+        "body": pr.get("body") or "",
+        "author": (pr.get("user") or {}).get("login", ""),
+        "base": (pr.get("base") or {}).get("ref", ""),
+        "head": (pr.get("head") or {}).get("ref", ""),
+    }
+
+    try:
+        token = get_installation_token(installation_id)
+        files = fetch_pr_files(owner, repo, pr_number, token)
+        commits = fetch_pr_commits(owner, repo, pr_number, token)
+    except Exception as e:
+        logging.exception("[pr] error obteniendo datos de PR %s/%s#%s: %s", owner, repo, pr_number, e)
+        return True
+
+    # Llamar a OpenAI
+    try:
+        review_md = review_pull_request(pr_details, files, commits)
+    except Exception as e:
+        logging.exception("[pr] error OpenAI en %s/%s#%s: %s", owner, repo, pr_number, e)
+        return True
+
+    # Publicar comentario en el PR
+    try:
+        comment_id = post_pr_comment(owner, repo, pr_number, token, review_md)
+        logging.info("[pr] comentario publicado id=%s en %s/%s#%s", comment_id, owner, repo, pr_number)
+    except Exception as e:
+        logging.exception("[pr] error publicando comentario en %s/%s#%s: %s", owner, repo, pr_number, e)
+
+    return True
+
 
 # -----------------------------
 # Función PADRE (única exportada)
@@ -116,6 +174,10 @@ def handle_github_event(event: str, payload: dict, allowed_owners: Optional[Set[
 
     if event == "installation_repositories" and action == "added":
         return _handle_installation_repositories_added(payload, allowed_owners)
+
+    if event == "pull_request":
+        handled = _handle_pull_request(payload, allowed_owners)
+        return handled
 
     # (aquí podrás ir sumando más handlers específicos en el futuro)
     return False
