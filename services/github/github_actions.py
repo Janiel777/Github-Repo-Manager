@@ -1,4 +1,5 @@
 # services/github/github_actions.py
+import json
 import time
 import logging
 import requests
@@ -253,13 +254,45 @@ def fetch_pr_commits(owner: str, repo: str, number: int, token: str) -> List[Dic
 
 def post_pr_comment(owner: str, repo: str, number: int, token: str, body_md: str) -> int:
     """
-    Publica un comentario en el PR (endpoint de issues comments). Devuelve comment_id.
+    Publica un comentario en el hilo del PR (endpoint de issue comments).
+    Devuelve el comment_id.
     """
-    r = requests.post(
-        f"{API}/repos/{owner}/{repo}/issues/{number}/comments",
-        headers=_headers(token),
-        json={"body": body_md},
-        timeout=20,
-    )
+    url = f"{API}/repos/{owner}/{repo}/issues/{number}/comments"
+    r = requests.post(url, headers=_headers(token), json={"body": body_md}, timeout=20)
+
+    if r.status_code == 422:
+        # Muestra por qué falló (Validation Failed, body demasiado corto, etc.)
+        try:
+            details = r.json()
+        except Exception:
+            details = {"raw": r.text}
+        logging.error("[pr] 422 al comentar: len(body)=%s preview=%r details=%s",
+                      len(body_md or ""), (body_md or "")[:180], json.dumps(details)[:800])
+        r.raise_for_status()
+
     r.raise_for_status()
     return r.json()["id"]
+
+
+def post_pr_review(owner: str, repo: str, number: int, token: str, body_md: str) -> str:
+    """
+    Crea una Pull Request Review con estado 'COMMENT'.
+    Devuelve el id o la url (según respuesta).
+    Requiere permiso Pull requests: write.
+    """
+    url = f"{API}/repos/{owner}/{repo}/pulls/{number}/reviews"
+    payload = {"body": body_md, "event": "COMMENT"}
+    r = requests.post(url, headers=_headers(token), json=payload, timeout=20)
+
+    if r.status_code == 422:
+        try:
+            details = r.json()
+        except Exception:
+            details = {"raw": r.text}
+        logging.error("[pr] 422 al crear review: len(body)=%s preview=%r details=%s",
+                      len(body_md or ""), (body_md or "")[:180], json.dumps(details)[:800])
+        r.raise_for_status()
+
+    r.raise_for_status()
+    data = r.json()
+    return data.get("id") or data.get("html_url") or "<review-created>"
