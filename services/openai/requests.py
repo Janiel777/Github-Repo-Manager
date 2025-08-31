@@ -3,7 +3,7 @@ import os
 import textwrap
 from typing import List, Dict, Any, Optional
 
-from openai import OpenAI
+from openai import OpenAI, BadRequestError
 
 _OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 _OPENAI_KEY = os.environ.get("OPENAI_API_KEY")
@@ -87,23 +87,39 @@ def build_pr_prompt(
     return f"{instrucciones}\n\n---\n\n{pr_intro}"
 
 
-def review_pull_request(
-    pr_details: Dict[str, Any],
-    pr_files: List[Dict[str, str]],
-    pr_commits: List[Dict[str, str]],
-) -> str:
-    """
-    Llama al modelo y devuelve Markdown con el análisis de la revisión.
-    """
-    prompt = build_pr_prompt(pr_details, pr_files, pr_commits)
+def review_pull_request(pr_details, pr_files, pr_commits, security_findings=None) -> str:
+    prompt = build_pr_prompt(pr_details, pr_files, pr_commits, security_findings)
     client = _get_client()
-    resp = client.chat.completions.create(
-        model=_OPENAI_MODEL,
-        temperature=0.2,
-        max_tokens=1200,
-        messages=[
-            {"role": "system", "content": "Eres un revisor de código senior, preciso y conciso."},
-            {"role": "user", "content": prompt},
-        ],
-    )
+
+    messages = [
+        {"role": "system", "content": "Eres un revisor de código senior, preciso y conciso."},
+        {"role": "user", "content": prompt},
+    ]
+
+    # Preferencia de tokens de salida
+    max_out = 1200
+    temp = 0.2
+    model = _OPENAI_MODEL
+
+    try:
+        # 1) Primero intentamos con max_tokens (compatibilidad modelos viejos)
+        resp = client.chat.completions.create(
+            model=model,
+            temperature=temp,
+            max_tokens=max_out,
+            messages=messages,
+        )
+    except BadRequestError as e:
+        # 2) Si el modelo exige max_completion_tokens, reintentamos
+        text = str(e).lower()
+        if "max_tokens" in text and "max_completion_tokens" in text:
+            resp = client.chat.completions.create(
+                model=model,
+                temperature=temp,
+                max_completion_tokens=max_out,
+                messages=messages,
+            )
+        else:
+            raise
+
     return resp.choices[0].message.content.strip()
