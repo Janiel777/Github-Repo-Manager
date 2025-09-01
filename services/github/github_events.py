@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import threading
 from typing import Optional, Set
 
 import requests
@@ -11,7 +12,7 @@ from .github_actions import post_comment, update_comment, fetch_pr_files, fetch_
 from .github_auth import get_installation_token
 from services.openai.planner import build_review_messages, make_price_table, render_budget_comment
 from services.openai.requests import review_pull_request
-from services.openai.models import MODELS
+
 
 __all__ = ["handle_github_event"]
 
@@ -22,6 +23,33 @@ def _fetch(token: str, url: str):
     r = requests.get(url, headers=h, timeout=25)
     r.raise_for_status()
     return r.json()
+
+def _run_review_job(
+    installation_id: int,
+    owner: str, repo: str, pr_number: int,
+    model: str, opts: dict, placeholder_id: int
+) -> None:
+    """Corre en background: carga contexto, llama OpenAI y actualiza el comentario."""
+    try:
+        token = get_installation_token(installation_id)
+        files   = fetch_pr_files(owner, repo, pr_number, token)
+        commits = fetch_pr_commits(owner, repo, pr_number, token)
+
+        review_md = review_pull_request(model, owner, repo, pr_number, files, commits, opts)
+        if not review_md or not review_md.strip():
+            review_md = "⚠️ La revisión no produjo contenido."
+
+        update_comment(owner, repo, placeholder_id, token, body_md=f"**Revisión ({model})**\n\n{review_md}")
+    except Exception as e:
+        # Nunca dejes al usuario con un placeholder vacío
+        try:
+            token = token if 'token' in locals() else get_installation_token(installation_id)
+            update_comment(
+                owner, repo, placeholder_id, token,
+                body_md=f"**Error ejecutando la revisión:** `{e}`"
+            )
+        except Exception:
+            pass
 
 
 # -----------------------------
@@ -124,62 +152,73 @@ def _parse_bot_command(body: str) -> tuple[str, list[str], dict]:
 
 def _handle_issue_comment(payload: dict) -> bool:
     """
-    Ejecuta /bot review <modelo> solo en PRs. Corre la revisión inline
-    y actualiza el comentario placeholder con el resultado o con el error.
+    Evento: issue_comment.created/edited
+    Comandos soportados (en comentarios de PR):
+      /bot review gpt-5
+      /bot review gpt-5-mini
+      /bot review gpt-4o-mini  max:1200 temp:0.7
     """
     action = payload.get("action")
-    if action != "created":
-        return True  # ignoramos edits/deletes
-
-    issue = payload.get("issue") or {}
-    # Solo si el "issue" es un PR (GitHub manda este campo cuando es PR)
-    if not issue.get("pull_request"):
-        return True  # comentario en issue normal: ignorar
-
-    comment = payload.get("comment") or {}
-    body = comment.get("body", "")
-    cmd, args, opts = _parse_bot_command(body)
-
-    # Aceptamos solo "/bot review <modelo>"
-    if cmd != "review":
-        return True  # otros comandos o nada => no-op
-
-    model = (args[0] if args else "").strip()
-    if not model:
-        # Responder ayuda mínima
-        owner, repo = extract_owner_repo(payload)
-        installation_id = (payload.get("installation") or {}).get("id")
-        token = get_installation_token(installation_id)
-        post_comment(owner, repo, issue["number"], token,
-                     "❌ Debes indicar el modelo. Ej: `/bot review gpt-5-mini`")
+    if action not in ("created", "edited"):
         return True
 
-    # Contexto
-    owner, repo = extract_owner_repo(payload)
-    pr_number = issue["number"]
-    installation_id = (payload.get("installation") or {}).get("id")
-    token = get_installation_token(installation_id)
+    comment = payload.get("comment", {}) or {}
+    body = (comment.get("body") or "").strip()
+    if not body.startswith("/bot"):
+        return True
 
-    # Placeholder
+    issue = payload.get("issue", {}) or {}
+
+    # Solo aceptamos en PRs (issue->pull_request presente)
+    if "pull_request" not in issue:
+        owner, repo = extract_owner_repo(payload)
+        if owner and repo:
+            # Intento de comentar en issue normal o discussion: informamos
+            installation_id = payload.get("installation", {}).get("id")
+            if installation_id:
+                token = get_installation_token(installation_id)
+                post_comment(owner, repo, issue.get("number"), token,
+                             "Este comando solo funciona en *Pull Requests*.")
+        return True
+
+    # Parseo del comando
+    # /bot review <modelo> [max:<n>] [temp:<x>]
+    parts = body.split()
+    if len(parts) < 3 or parts[1] != "review":
+        return True
+
+    model = parts[2].strip()
+    opts: dict = {}
+    for p in parts[3:]:
+        if p.startswith("max:"):
+            try:
+                opts["max_output_tokens"] = int(p.split(":", 1)[1])
+            except Exception:
+                pass
+        elif p.startswith("temp:"):
+            try:
+                opts["temperature"] = float(p.split(":", 1)[1])
+            except Exception:
+                pass
+
+    repo_node = payload.get("repository", {}) or {}
+    owner = (repo_node.get("owner") or {}).get("login")
+    repo = repo_node.get("name")
+    pr_number = issue.get("number")
+    installation_id = payload.get("installation", {}).get("id")
+
+    token = get_installation_token(installation_id)
     placeholder_id = post_comment(
         owner, repo, pr_number, token,
-        f"🧠 Ejecutando revisión con **{model}**…\n\n*(esto puede tardar unos segundos)*"
+        body_md=f"🔄 Ejecutando revisión con **{model}**...\n\n*(esto puede tardar unos segundos)*"
     )
 
-    try:
-        # Cargar contexto del PR
-        files = fetch_pr_files(owner, repo, pr_number, token)
-        commits = fetch_pr_commits(owner, repo, pr_number, token)
-
-        # Ejecutar la revisión (tu función debe devolver Markdown)
-        review_md = review_pull_request(model, owner, repo, pr_number, files, commits, opts)
-
-        if not review_md or not review_md.strip():
-            review_md = "⚠️ La revisión no produjo contenido."
-
-        update_comment(owner, repo, placeholder_id, token, f"### Revisión ({model})\n\n{review_md}")
-    except Exception as e:
-        update_comment(owner, repo, placeholder_id, token, f"❌ Error ejecutando la revisión: `{e}`")
+    # 🔸 Lanza la revisión en background y responde YA al webhook
+    threading.Thread(
+        target=_run_review_job,
+        args=(installation_id, owner, repo, pr_number, model, opts, placeholder_id),
+        daemon=True
+    ).start()
 
     return True
 

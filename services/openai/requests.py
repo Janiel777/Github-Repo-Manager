@@ -1,18 +1,24 @@
 # services/openai/requests.py
 import os
+
+from httpx import Timeout
 from openai import OpenAI
 from .models import MODELS
 
 _OPENAI_KEY = os.environ.get("OPENAI_API_KEY")
-_client = None
+_client: OpenAI | None = None
 
-def _get_client() -> OpenAI:
+
+def get_client() -> OpenAI:
     global _client
     if _client is None:
-        if not _OPENAI_KEY:
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if not api_key:
             raise RuntimeError("Falta OPENAI_API_KEY")
-        _client = OpenAI(api_key=_OPENAI_KEY)
+        # Timeouts conservadores para evitar colgarnos
+        _client = OpenAI(api_key=api_key, timeout=Timeout(connect=10.0, read=30.0, write=30.0))
     return _client
+
 
 def _build_prompt(owner: str, repo: str, pr_number: int,
                   files: list[dict], commits: list[dict]) -> list[dict]:
@@ -30,13 +36,13 @@ def _build_prompt(owner: str, repo: str, pr_number: int,
         parts.append(f"### {name}\n```diff\n{take}\n```")
 
     commits_md = "\n".join(
-        f"- {c.get('sha','')[:7]}: {c.get('message','')}" for c in commits
+        f"- {c.get('sha', '')[:7]}: {c.get('message', '')}" for c in commits
     )
 
     user_content = (
-        f"Repository: {owner}/{repo}\nPR: #{pr_number}\n\n"
-        f"Commits:\n{commits_md}\n\n"
-        "Changes by file:\n" + "\n\n".join(parts)
+            f"Repository: {owner}/{repo}\nPR: #{pr_number}\n\n"
+            f"Commits:\n{commits_md}\n\n"
+            "Changes by file:\n" + "\n\n".join(parts)
     )
 
     messages = [
@@ -55,6 +61,7 @@ def _build_prompt(owner: str, repo: str, pr_number: int,
     ]
     return messages
 
+
 def review_pull_request(model: str, owner: str, repo: str, pr_number: int,
                         files: list[dict], commits: list[dict], opts: dict) -> str:
     """
@@ -63,7 +70,7 @@ def review_pull_request(model: str, owner: str, repo: str, pr_number: int,
     - gpt-5 / gpt-5-mini: usar max_output_tokens (no temperature).
     - gpt-4o-mini: usar temperature (opcional) y max_tokens (opcional).
     """
-    client = _get_client()
+    client = get_client()
     messages = _build_prompt(owner, repo, pr_number, files, commits)
 
     model = (model or "").strip()
