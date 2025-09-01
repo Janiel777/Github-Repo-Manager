@@ -10,7 +10,7 @@ from .github_utils import extract_owner_repo
 from .github_actions import post_comment, update_comment, fetch_pr_files, fetch_pr_commits
 from .github_auth import get_installation_token
 from services.openai.planner import build_review_messages, make_price_table, render_budget_comment
-from services.openai.requests import run_review, review_pull_request
+from services.openai.requests import review_pull_request
 from services.openai.models import MODELS
 
 __all__ = ["handle_github_event"]
