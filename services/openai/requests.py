@@ -14,46 +14,95 @@ def _get_client() -> OpenAI:
         _client = OpenAI(api_key=_OPENAI_KEY)
     return _client
 
-def run_review(messages: list[dict], model_id: str, max_out: int | None = None, temperature: float | None = None) -> str:
-    """
-    Ejecuta el modelo elegido con parámetros válidos por familia:
-    - gpt-5 / gpt-5-mini: usan max_completion_tokens; NO pasamos temperature.
-    - gpt-4o-mini: usa max_tokens y sí acepta temperature.
-    """
-    if model_id not in {v["id"] for v in MODELS.values()}:
-        raise ValueError(f"Modelo no soportado: {model_id}")
+def _build_prompt(owner: str, repo: str, pr_number: int,
+                  files: list[dict], commits: list[dict]) -> list[dict]:
+    # Limita tamaño de diffs para no disparar tokens
+    parts = []
+    remaining = 20000  # caracteres de parches (aprox) para el prompt
+    for f in files:
+        name = f.get("filename", "")
+        patch = f.get("patch", "") or ""
+        if remaining <= 0:
+            parts.append(f"### {name}\n*(truncado por tamaño)*")
+            continue
+        take = patch[:remaining]
+        remaining -= len(take)
+        parts.append(f"### {name}\n```diff\n{take}\n```")
 
+    commits_md = "\n".join(
+        f"- {c.get('sha','')[:7]}: {c.get('message','')}" for c in commits
+    )
+
+    user_content = (
+        f"Repository: {owner}/{repo}\nPR: #{pr_number}\n\n"
+        f"Commits:\n{commits_md}\n\n"
+        "Changes by file:\n" + "\n\n".join(parts)
+    )
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a senior code reviewer. Provide a concise but thorough review:\n"
+                "- Summarize the intent of the PR.\n"
+                "- Check best practices (naming, docs, tests, structure).\n"
+                "- Check security/privacy (secrets committed, .gitignore issues).\n"
+                "- Spot logic or edge-case issues.\n"
+                "Return Markdown with headings and bullet points."
+            ),
+        },
+        {"role": "user", "content": user_content},
+    ]
+    return messages
+
+def review_pull_request(model: str, owner: str, repo: str, pr_number: int,
+                        files: list[dict], commits: list[dict], opts: dict) -> str:
+    """
+    Ejecuta la revisión con el modelo indicado.
+    Modelos esperados: 'gpt-5', 'gpt-5-mini', 'gpt-4o-mini'
+    - gpt-5 / gpt-5-mini: usar max_output_tokens (no temperature).
+    - gpt-4o-mini: usar temperature (opcional) y max_tokens (opcional).
+    """
     client = _get_client()
+    messages = _build_prompt(owner, repo, pr_number, files, commits)
 
-    # Defaults conservadores
-    if max_out is None:
-        max_out = 1200
+    model = (model or "").strip()
+    if model not in {"gpt-5", "gpt-5-mini", "gpt-4o-mini"}:
+        raise ValueError(f"Modelo no soportado: {model}")
 
-    # Enrutado por familia
-    if model_id in ("gpt-5", "gpt-5-mini"):
-        # Estos modelos aceptan max_completion_tokens y (en muchos despliegues) ignoran/limitan temperature.
-        resp = client.chat.completions.create(
-            model=model_id,
-            messages=messages,
-            max_completion_tokens=max_out,
-        )
-    elif model_id == "gpt-4o-mini":
-        # 4o-mini es chat-completions “clásico”
-        kwargs = {
-            "model": model_id,
-            "messages": messages,
-            "max_tokens": max_out,
-        }
-        # temperature opcional/soportada aquí
-        if isinstance(temperature, (int, float)):
-            kwargs["temperature"] = float(temperature)
-        resp = client.chat.completions.create(**kwargs)
+    kwargs = dict(model=model, messages=messages)
+
+    # Parametrización por modelo
+    if model.startswith("gpt-5"):
+        # max_output_tokens (si el usuario pasó 'max' o 'max:salida')
+        if "max" in opts:
+            try:
+                kwargs["max_output_tokens"] = int(opts["max"])
+            except Exception:
+                pass
+        elif "max:salida" in opts:
+            try:
+                kwargs["max_output_tokens"] = int(opts["max:salida"])
+            except Exception:
+                pass
+        # temperatura: dejar por defecto para gpt-5
     else:
-        # fallback genérico
-        resp = client.chat.completions.create(
-            model=model_id,
-            messages=messages,
-            max_tokens=max_out,
-        )
+        # gpt-4o-mini
+        if "temp" in opts:
+            try:
+                kwargs["temperature"] = float(opts["temp"])
+            except Exception:
+                pass
+        if "temp:0.2" in opts:  # por si llega con formato raro
+            try:
+                kwargs["temperature"] = float(opts["temp:0.2"])
+            except Exception:
+                pass
+        if "max" in opts:
+            try:
+                kwargs["max_tokens"] = int(opts["max"])
+            except Exception:
+                pass
 
-    return (resp.choices[0].message.content or "").strip()
+    resp = client.chat.completions.create(**kwargs)
+    return resp.choices[0].message.content or ""

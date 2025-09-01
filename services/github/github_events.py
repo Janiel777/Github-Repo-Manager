@@ -7,10 +7,10 @@ from typing import Optional, Set
 import requests
 
 from .github_utils import extract_owner_repo
-from .github_actions import post_issue_comment
+from .github_actions import post_comment, update_comment, fetch_pr_files, fetch_pr_commits
 from .github_auth import get_installation_token
 from services.openai.planner import build_review_messages, make_price_table, render_budget_comment
-from services.openai.requests import run_review
+from services.openai.requests import run_review, review_pull_request
 from services.openai.models import MODELS
 
 __all__ = ["handle_github_event"]
@@ -92,7 +92,7 @@ def _handle_pull_request(payload: dict) -> bool:
     messages = build_review_messages(pr.get("title",""), pr.get("body",""), files, commits)
     tokens_in, prices = make_price_table(messages, max_out=1200, cached_ratio=0.0)
     body = render_budget_comment(tokens_in, prices)
-    post_issue_comment(owner, name, number, token, body)
+    post_comment(owner, name, number, token, body)
     return True
 
 
@@ -101,59 +101,86 @@ _CMD_REVIEW = re.compile(
     re.IGNORECASE
 )
 
-def _handle_issue_comment(payload: dict) -> bool:
-    issue = payload.get("issue") or {}
-    # Sólo atendemos comentarios en PRs
-    if not issue.get("pull_request"):
-        return True
+def _parse_bot_command(body: str) -> tuple[str, list[str], dict]:
+    """
+    Devuelve (cmd, args, opts) para líneas tipo:
+      /bot review gpt-5-mini max:1500 temp:0.8
+    """
+    body = (body or "").strip()
+    if not body.startswith("/bot "):
+        return "", [], {}
+    parts = body.split()
+    # /bot <cmd> [args...] [k:v ...]
+    cmd = parts[1] if len(parts) > 1 else ""
+    args = []
+    opts = {}
+    for token in parts[2:]:
+        if ":" in token:
+            k, v = token.split(":", 1)
+            opts[k.strip().lower()] = v.strip()
+        else:
+            args.append(token.strip())
+    return cmd.lower(), args, opts
 
-    if payload.get("action") != "created":
-        return True
+def _handle_issue_comment(payload: dict) -> bool:
+    """
+    Ejecuta /bot review <modelo> solo en PRs. Corre la revisión inline
+    y actualiza el comentario placeholder con el resultado o con el error.
+    """
+    action = payload.get("action")
+    if action != "created":
+        return True  # ignoramos edits/deletes
+
+    issue = payload.get("issue") or {}
+    # Solo si el "issue" es un PR (GitHub manda este campo cuando es PR)
+    if not issue.get("pull_request"):
+        return True  # comentario en issue normal: ignorar
 
     comment = payload.get("comment") or {}
-    text = (comment.get("body") or "").strip()
-    if not text.lower().startswith("/bot"):
+    body = comment.get("body", "")
+    cmd, args, opts = _parse_bot_command(body)
+
+    # Aceptamos solo "/bot review <modelo>"
+    if cmd != "review":
+        return True  # otros comandos o nada => no-op
+
+    model = (args[0] if args else "").strip()
+    if not model:
+        # Responder ayuda mínima
+        owner, repo = extract_owner_repo(payload)
+        installation_id = (payload.get("installation") or {}).get("id")
+        token = get_installation_token(installation_id)
+        post_comment(owner, repo, issue["number"], token,
+                     "❌ Debes indicar el modelo. Ej: `/bot review gpt-5-mini`")
         return True
 
-    repo = payload.get("repository") or {}
-    owner = (repo.get("owner") or {}).get("login")
-    name = repo.get("name")
-    number = issue.get("number")
+    # Contexto
+    owner, repo = extract_owner_repo(payload)
+    pr_number = issue["number"]
     installation_id = (payload.get("installation") or {}).get("id")
     token = get_installation_token(installation_id)
 
-    # Ayuda / modelos
-    if text.lower().startswith("/bot models") or text.lower().startswith("/bot help"):
-        models_txt = ", ".join(sorted({v['id'] for v in MODELS.values()}))
-        post_issue_comment(owner, name, number, token,
-                           f"Modelos disponibles: `{models_txt}`\n\nEjemplo: `/bot review gpt-5-mini max:1500`")
-        return True
-
-    m = _CMD_REVIEW.match(text)
-    if not m:
-        post_issue_comment(owner, name, number, token,
-                           "Comando no reconocido. Usa `/bot review <modelo> [max:N] [temp:X]` "
-                           "o `/bot models` para ver opciones.")
-        return True
-
-    model_id = m.group(1)
-    max_out  = int(m.group(2)) if m.group(2) else None
-    temp_str = m.group(3)
-    temperature = float(temp_str) if temp_str else None
-
-    # Reconstruir contexto del PR
-    pr      = _fetch(token, f"{API}/repos/{owner}/{name}/pulls/{number}")
-    files   = _fetch(token, f"{API}/repos/{owner}/{name}/pulls/{number}/files")
-    commits = _fetch(token, f"{API}/repos/{owner}/{name}/pulls/{number}/commits")
-    messages = build_review_messages(pr.get("title",""), pr.get("body",""), files, commits)
+    # Placeholder
+    placeholder_id = post_comment(
+        owner, repo, pr_number, token,
+        f"🧠 Ejecutando revisión con **{model}**…\n\n*(esto puede tardar unos segundos)*"
+    )
 
     try:
-        review_md = run_review(messages, model_id=model_id, max_out=max_out, temperature=temperature)
-    except Exception as e:
-        post_issue_comment(owner, name, number, token, f"❌ Error ejecutando el análisis: `{e}`")
-        return True
+        # Cargar contexto del PR
+        files = fetch_pr_files(owner, repo, pr_number, token)
+        commits = fetch_pr_commits(owner, repo, pr_number, token)
 
-    post_issue_comment(owner, name, number, token, f"### 🤖 Revisión ({model_id})\n\n{review_md}")
+        # Ejecutar la revisión (tu función debe devolver Markdown)
+        review_md = review_pull_request(model, owner, repo, pr_number, files, commits, opts)
+
+        if not review_md or not review_md.strip():
+            review_md = "⚠️ La revisión no produjo contenido."
+
+        update_comment(owner, repo, placeholder_id, token, f"### Revisión ({model})\n\n{review_md}")
+    except Exception as e:
+        update_comment(owner, repo, placeholder_id, token, f"❌ Error ejecutando la revisión: `{e}`")
+
     return True
 
 # -----------------------------

@@ -12,11 +12,58 @@ def _headers(token: str) -> dict:
         "User-Agent": "repo-manager-bot"
     }
 
-def post_issue_comment(owner: str, repo: str, number: int, token: str, body_md: str) -> int:
-    """
-    Publica un comentario en PR/Issue. 'number' es el Issue/PR number.
-    """
-    url = f"{API}/repos/{owner}/{repo}/issues/{number}/comments"
-    r = requests.post(url, headers=_headers(token), json={"body": body_md}, timeout=20)
+def post_comment(owner: str, repo: str, issue_number: int, token: str, body_md: str) -> int:
+    url = f"{API}/repos/{owner}/{repo}/issues/{issue_number}/comments"
+    r = requests.post(url, headers=_headers(token), json={"body": body_md}, timeout=25)
     r.raise_for_status()
     return r.json()["id"]
+
+def update_comment(owner: str, repo: str, comment_id: int, token: str, body_md: str) -> None:
+    url = f"{API}/repos/{owner}/{repo}/issues/comments/{comment_id}"
+    r = requests.patch(url, headers=_headers(token), json={"body": body_md}, timeout=25)
+    r.raise_for_status()
+
+def fetch_pr_files(owner: str, repo: str, number: int, token: str) -> list[dict]:
+    """Devuelve [{filename, patch}] de /pulls/{number}/files (paginado)."""
+    items: list[dict] = []
+    page = 1
+    while True:
+        r = requests.get(
+            f"{API}/repos/{owner}/{repo}/pulls/{number}/files",
+            headers=_headers(token),
+            params={"per_page": 100, "page": page},
+            timeout=25,
+        )
+        r.raise_for_status()
+        batch = r.json()
+        for it in batch:
+            items.append({"filename": it.get("filename", ""), "patch": it.get("patch", "")})
+        if len(batch) < 100:
+            break
+        page += 1
+    return items
+
+def fetch_pr_commits(owner: str, repo: str, number: int, token: str) -> list[dict]:
+    """Devuelve [{sha, message, author}] de /pulls/{number}/commits (paginado)."""
+    items: list[dict] = []
+    page = 1
+    while True:
+        r = requests.get(
+            f"{API}/repos/{owner}/{repo}/pulls/{number}/commits",
+            headers=_headers(token),
+            params={"per_page": 100, "page": page},
+            timeout=25,
+        )
+        r.raise_for_status()
+        batch = r.json()
+        for it in batch:
+            commit = it.get("commit", {}) or {}
+            items.append({
+                "sha": it.get("sha", ""),
+                "message": (commit.get("message") or "").strip(),
+                "author": ((commit.get("author") or {}).get("name") or ""),
+            })
+        if len(batch) < 100:
+            break
+        page += 1
+    return items
