@@ -1,6 +1,7 @@
 # services/github/github_events.py
 from __future__ import annotations
 
+import os
 import re
 import threading
 from typing import Optional, Set
@@ -17,7 +18,7 @@ from services.openai.requests import review_pull_request
 __all__ = ["handle_github_event"]
 
 API = "https://api.github.com"
-
+BOT_LOGIN = os.environ.get("GITHUB_BOT_LOGIN", "").strip().lower()
 def _fetch(token: str, url: str):
     h = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
     r = requests.get(url, headers=h, timeout=25)
@@ -152,72 +153,115 @@ def _parse_bot_command(body: str) -> tuple[str, list[str], dict]:
 
 def _handle_issue_comment(payload: dict) -> bool:
     """
-    Evento: issue_comment.created/edited
-    Comandos soportados (en comentarios de PR):
-      /bot review gpt-5
-      /bot review gpt-5-mini
-      /bot review gpt-4o-mini  max:1200 temp:0.7
+    issue_comment.{created,edited}
+    Comando soportado (solo en PRs):
+      /bot review <gpt-5|gpt-5-mini|gpt-4o-mini> [max:<n>] [temp:<x>]
     """
     action = payload.get("action")
     if action not in ("created", "edited"):
         return True
 
-    comment = payload.get("comment", {}) or {}
-    body = (comment.get("body") or "").strip()
-    if not body.startswith("/bot"):
+    comment = payload.get("comment") or {}
+    user = (comment.get("user") or {})
+    user_login = (user.get("login") or "").strip().lower()
+
+    # 1) Evitar responder a nuestros propios comentarios o a cualquier [bot]
+    if user_login == BOT_LOGIN or user_login.endswith("[bot]"):
         return True
 
-    issue = payload.get("issue", {}) or {}
-
-    # Solo aceptamos en PRs (issue->pull_request presente)
-    if "pull_request" not in issue:
-        owner, repo = extract_owner_repo(payload)
-        if owner and repo:
-            # Intento de comentar en issue normal o discussion: informamos
-            installation_id = payload.get("installation", {}).get("id")
-            if installation_id:
-                token = get_installation_token(installation_id)
-                post_comment(owner, repo, issue.get("number"), token,
-                             "Este comando solo funciona en *Pull Requests*.")
+    # 2) Parsear SOLO la primera línea
+    body_raw = (comment.get("body") or "")
+    first_line = body_raw.strip().splitlines()[0].strip()
+    if not first_line.lower().startswith("/bot "):
         return True
 
-    # Parseo del comando
-    # /bot review <modelo> [max:<n>] [temp:<x>]
-    parts = body.split()
-    if len(parts) < 3 or parts[1] != "review":
+    parts = first_line.split()
+    if len(parts) < 3 or parts[1].lower() != "review":
+        # No es un subcomando válido -> ignorar
         return True
 
-    model = parts[2].strip()
-    opts: dict = {}
-    for p in parts[3:]:
-        if p.startswith("max:"):
-            try:
-                opts["max_output_tokens"] = int(p.split(":", 1)[1])
-            except Exception:
-                pass
-        elif p.startswith("temp:"):
-            try:
-                opts["temperature"] = float(p.split(":", 1)[1])
-            except Exception:
-                pass
-
-    repo_node = payload.get("repository", {}) or {}
+    # 3) Modelo (normaliza alias)
+    alias = parts[2].lower()
+    MODEL_ALIASES = {
+        "gpt5": "gpt-5",
+        "gpt-5": "gpt-5",
+        "gpt5-mini": "gpt-5-mini",
+        "gpt-5-mini": "gpt-5-mini",
+        "4o-mini": "gpt-4o-mini",
+        "gpt-4o-mini": "gpt-4o-mini",
+    }
+    model = MODEL_ALIASES.get(alias)
+    repo_node = payload.get("repository") or {}
     owner = (repo_node.get("owner") or {}).get("login")
     repo = repo_node.get("name")
+    issue = payload.get("issue") or {}
+
+    # 4) Asegurar que sea un PR (issue tiene la llave pull_request)
+    if "pull_request" not in issue:
+        if owner and repo:
+            inst_id = (payload.get("installation") or {}).get("id")
+            if inst_id:
+                try:
+                    token = get_installation_token(inst_id)
+                    post_comment(owner, repo, issue.get("number"), token,
+                                 "Este comando solo funciona en *Pull Requests*.")
+                except Exception:
+                    pass
+        return True
+
+    if not model:
+        # Responder con ayuda si el modelo no es válido
+        inst_id = (payload.get("installation") or {}).get("id")
+        if owner and repo and inst_id:
+            try:
+                token = get_installation_token(inst_id)
+                post_comment(
+                    owner, repo, issue.get("number"), token,
+                    "Modelo no soportado. Usa: `gpt-5`, `gpt-5-mini` o `gpt-4o-mini`.\n"
+                    "Ejemplo: `/bot review gpt-5-mini max:1200 temp:0.7`"
+                )
+            except Exception:
+                pass
+        return True
+
+    # 5) Opciones genéricas; el runner mapeará según el modelo
+    opts: dict = {}
+    for p in parts[3:]:
+        k, _, v = p.partition(":")
+        k = k.strip().lower()
+        v = v.strip()
+        if k == "max":
+            try:
+                opts["max"] = int(v)
+            except Exception:
+                pass
+        elif k == "temp":
+            try:
+                opts["temp"] = float(v)
+            except Exception:
+                pass
+
     pr_number = issue.get("number")
-    installation_id = payload.get("installation", {}).get("id")
+    inst_id = (payload.get("installation") or {}).get("id")
 
-    token = get_installation_token(installation_id)
-    placeholder_id = post_comment(
-        owner, repo, pr_number, token,
-        body_md=f"🔄 Ejecutando revisión con **{model}**...\n\n*(esto puede tardar unos segundos)*"
-    )
+    # 6) Validaciones finales
+    if not (owner and repo and pr_number and inst_id):
+        return True
 
-    # 🔸 Lanza la revisión en background y responde YA al webhook
+    # 7) Placeholder y ejecución en background
+    try:
+        token = get_installation_token(inst_id)
+        placeholder_id = post_comment(
+            owner, repo, pr_number, token,
+            f"🧠 Ejecutando revisión con **{model}**…\n\n*(esto puede tardar unos segundos)*"
+        )
+    except Exception:
+        return True
+
     threading.Thread(
         target=_run_review_job,
-        args=(installation_id, owner, repo, pr_number, model, opts, placeholder_id),
-        daemon=True
+        args=(inst_id, owner, repo, pr_number, model, opts, placeholder_id),
+        daemon=True,
     ).start()
 
     return True

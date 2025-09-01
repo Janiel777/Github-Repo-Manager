@@ -1,7 +1,8 @@
 # services/openai/requests.py
 import os
 
-from httpx import Timeout
+import httpx
+
 from openai import OpenAI
 from .models import MODELS
 
@@ -15,8 +16,16 @@ def get_client() -> OpenAI:
         api_key = os.environ.get("OPENAI_API_KEY")
         if not api_key:
             raise RuntimeError("Falta OPENAI_API_KEY")
-        # Timeouts conservadores para evitar colgarnos
-        _client = OpenAI(api_key=api_key, timeout=Timeout(connect=10.0, read=30.0, write=30.0))
+
+        # Timeout correcto para httpx:
+        # - default/read/write/pool = 60s, connect = 10s
+        timeout = httpx.Timeout(60.0, connect=10.0)
+
+        _client = OpenAI(
+            api_key=api_key,
+            timeout=timeout,
+            max_retries=2,  # opcional
+        )
     return _client
 
 
