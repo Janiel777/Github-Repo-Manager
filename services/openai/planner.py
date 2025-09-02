@@ -47,8 +47,6 @@ def make_price_table(messages: list[dict], max_out: int = DEFAULT_MAX_OUT, cache
 def render_budget_comment(tokens_in: int, prices: dict) -> str:
     return (
         "### 🤖 Presupuesto de análisis con IA (estimado)\n\n"
-        f"- Tokens de entrada (conservador): **{tokens_in:,}**\n"
-        f"- Límite de salida considerado: **{DEFAULT_MAX_OUT}** tokens\n\n"
         "| Modelo | Costo estimado |\n"
         "|---|---|\n"
         f"| gpt-5 | ${prices['gpt-5']:.4f} |\n"
