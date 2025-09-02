@@ -58,21 +58,25 @@ def _build_prompt(owner: str, repo: str, pr_number: int,
         {"role": "user", "content": user_content},
     ]
 
+def _extract_text(choice) -> str:
+    """Soporta content=str o content=[{type,text}, ...]."""
+    msg = choice.message
+    if isinstance(msg.content, str) and msg.content:
+        return msg.content
+    # content parts (nuevo formato en algunos modelos)
+    if isinstance(msg.content, list):
+        parts = []
+        for p in msg.content:
+            # campos típicos: {"type": "output_text"|"text", "text": "..."}
+            t = (p.get("text") if isinstance(p, dict) else None) or ""
+            parts.append(t)
+        return "".join(parts).strip()
+    # si hay campo refusal, inclúyelo para que se vea el motivo
+    ref = getattr(msg, "refusal", None)
+    return (ref or "").strip()
 
-def review_pull_request(
-    model: str,
-    owner: str,
-    repo: str,
-    pr_number: int,
-    files: list[dict],
-    commits: list[dict],
-    _opts_ignored: dict,   # mantenemos la firma pero ya no usamos opciones
-) -> str:
-    """
-    Ejecuta la revisión con el modelo indicado.
-    - gpt-5 / gpt-5-mini => usar max_completion_tokens (NO temperature).
-    - gpt-4o-mini        => usar max_tokens (temperature por defecto).
-    """
+def review_pull_request(model: str, owner: str, repo: str, pr_number: int,
+                        files: list[dict], commits: list[dict], _opts_ignored: dict) -> str:
     client = get_client()
     messages = _build_prompt(owner, repo, pr_number, files, commits)
 
@@ -82,21 +86,31 @@ def review_pull_request(
             "model": "gpt-5",
             "messages": messages,
             "max_completion_tokens": DEFAULT_MAX_OUT,
+            "response_format": {"type": "text"},
         }
     elif m == "gpt-5-mini":
         kwargs = {
             "model": "gpt-5-mini",
             "messages": messages,
             "max_completion_tokens": DEFAULT_MAX_OUT,
+            "response_format": {"type": "text"},
         }
     elif m == "gpt-4o-mini":
         kwargs = {
             "model": "gpt-4o-mini",
             "messages": messages,
             "max_tokens": DEFAULT_MAX_OUT,
+            "response_format": {"type": "text"},
         }
     else:
         raise ValueError(f"Modelo no soportado: {model}")
 
     resp = client.chat.completions.create(**kwargs)
-    return resp.choices[0].message.content or ""
+    text = _extract_text(resp.choices[0])
+
+    # Retry rápido si quedó vacío (a veces por filtro o formato)
+    if not text:
+        resp = client.chat.completions.create(**kwargs)
+        text = _extract_text(resp.choices[0])
+
+    return text
