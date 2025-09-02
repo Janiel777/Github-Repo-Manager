@@ -19,7 +19,7 @@ def get_client() -> OpenAI:
 
         # Timeout correcto para httpx:
         # - default/read/write/pool = 60s, connect = 10s
-        timeout = httpx.Timeout(60.0, connect=10.0)
+        timeout = httpx.Timeout(80.0, connect=10.0)
 
         _client = OpenAI(
             api_key=api_key,
