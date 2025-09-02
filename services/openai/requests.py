@@ -59,27 +59,44 @@ def _build_prompt(owner: str, repo: str, pr_number: int,
     ]
 
 
-def review_pull_request(model: str, owner: str, repo: str, pr_number: int,
-                        files: list[dict], commits: list[dict], _opts_ignored: dict) -> str:
+def review_pull_request(
+    model: str,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    files: list[dict],
+    commits: list[dict],
+    _opts_ignored: dict,   # mantenemos la firma pero ya no usamos opciones
+) -> str:
     """
-    Ejecuta la revisión con el modelo indicado (sin parámetros de usuario).
-    - gpt-5 / gpt-5-mini: usar max_output_tokens=DEFAULT_MAX_OUT (no temperature).
-    - gpt-4o-mini: usar max_tokens=DEFAULT_MAX_OUT (temperature por defecto del modelo).
+    Ejecuta la revisión con el modelo indicado.
+    - gpt-5 / gpt-5-mini => usar max_completion_tokens (NO temperature).
+    - gpt-4o-mini        => usar max_tokens (temperature por defecto).
     """
     client = get_client()
     messages = _build_prompt(owner, repo, pr_number, files, commits)
 
-    model = (model or "").strip()
-    if model not in {"gpt-5", "gpt-5-mini", "gpt-4o-mini"}:
-        raise ValueError(f"Modelo no soportado: {model}")
-
-    kwargs = dict(model=model, messages=messages)
-
-    if model.startswith("gpt-5"):
-        kwargs["max_output_tokens"] = DEFAULT_MAX_OUT
+    m = (model or "").strip()
+    if m == "gpt-5":
+        kwargs = {
+            "model": "gpt-5",
+            "messages": messages,
+            "max_completion_tokens": DEFAULT_MAX_OUT,
+        }
+    elif m == "gpt-5-mini":
+        kwargs = {
+            "model": "gpt-5-mini",
+            "messages": messages,
+            "max_completion_tokens": DEFAULT_MAX_OUT,
+        }
+    elif m == "gpt-4o-mini":
+        kwargs = {
+            "model": "gpt-4o-mini",
+            "messages": messages,
+            "max_tokens": DEFAULT_MAX_OUT,
+        }
     else:
-        # gpt-4o-mini
-        kwargs["max_tokens"] = DEFAULT_MAX_OUT
+        raise ValueError(f"Modelo no soportado: {model}")
 
     resp = client.chat.completions.create(**kwargs)
     return resp.choices[0].message.content or ""
