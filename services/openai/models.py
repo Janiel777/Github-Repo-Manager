@@ -1,8 +1,6 @@
-# services/openai/models.py
 from __future__ import annotations
 
 # Tabla de modelos y precios (USD por 1 millón de tokens)
-# Puedes ajustar valores cuando cambien los precios.
 MODELS = {
     "gpt5": {
         "id": "gpt-5",
@@ -33,8 +31,8 @@ def model_from_id(model_id: str) -> dict | None:
 def estimate_cost(tokens_in: int, max_out: int, model_key: str, cached_ratio: float = 0.0) -> float:
     """
     tokens_in: estimación de entrada
-    max_out: tope de salida que planeas pedir
-    cached_ratio: fracción de entrada facturable con cache-hit (0..1). 0.0 = nada cacheado.
+    max_out: tope de salida (peor caso)
+    cached_ratio: fracción de entrada facturable con cache-hit (0..1).
     """
     m = MODELS[model_key]
     billable_in = max(tokens_in * (1.0 - max(0.0, min(1.0, cached_ratio))), 0)

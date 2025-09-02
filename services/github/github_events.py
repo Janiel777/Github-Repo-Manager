@@ -155,7 +155,7 @@ def _handle_issue_comment(payload: dict) -> bool:
     """
     issue_comment.{created,edited}
     Comando soportado (solo en PRs):
-      /bot review <gpt-5|gpt-5-mini|gpt-4o-mini> [max:<n>] [temp:<x>]
+      /bot review <gpt-5|gpt-5-mini|gpt-4o-mini>
     """
     action = payload.get("action")
     if action not in ("created", "edited"):
@@ -165,11 +165,11 @@ def _handle_issue_comment(payload: dict) -> bool:
     user = (comment.get("user") or {})
     user_login = (user.get("login") or "").strip().lower()
 
-    # 1) Evitar responder a nuestros propios comentarios o a cualquier [bot]
+    # Evitar responder a nuestros propios comentarios o a cualquier [bot]
     if user_login == BOT_LOGIN or user_login.endswith("[bot]"):
         return True
 
-    # 2) Parsear SOLO la primera línea
+    # Solo la primera línea del comentario
     body_raw = (comment.get("body") or "")
     first_line = body_raw.strip().splitlines()[0].strip()
     if not first_line.lower().startswith("/bot "):
@@ -177,10 +177,9 @@ def _handle_issue_comment(payload: dict) -> bool:
 
     parts = first_line.split()
     if len(parts) < 3 or parts[1].lower() != "review":
-        # No es un subcomando válido -> ignorar
         return True
 
-    # 3) Modelo (normaliza alias)
+    # Normaliza alias de modelo
     alias = parts[2].lower()
     MODEL_ALIASES = {
         "gpt5": "gpt-5",
@@ -191,12 +190,13 @@ def _handle_issue_comment(payload: dict) -> bool:
         "gpt-4o-mini": "gpt-4o-mini",
     }
     model = MODEL_ALIASES.get(alias)
+
     repo_node = payload.get("repository") or {}
     owner = (repo_node.get("owner") or {}).get("login")
     repo = repo_node.get("name")
     issue = payload.get("issue") or {}
 
-    # 4) Asegurar que sea un PR (issue tiene la llave pull_request)
+    # Asegurar que sea un PR
     if "pull_request" not in issue:
         if owner and repo:
             inst_id = (payload.get("installation") or {}).get("id")
@@ -210,7 +210,7 @@ def _handle_issue_comment(payload: dict) -> bool:
         return True
 
     if not model:
-        # Responder con ayuda si el modelo no es válido
+        # Respuesta de ayuda sin max/temp
         inst_id = (payload.get("installation") or {}).get("id")
         if owner and repo and inst_id:
             try:
@@ -218,37 +218,18 @@ def _handle_issue_comment(payload: dict) -> bool:
                 post_comment(
                     owner, repo, issue.get("number"), token,
                     "Modelo no soportado. Usa: `gpt-5`, `gpt-5-mini` o `gpt-4o-mini`.\n"
-                    "Ejemplo: `/bot review gpt-5-mini max:1200 temp:0.7`"
+                    "Ejemplo: `/bot review gpt-5-mini`"
                 )
             except Exception:
                 pass
         return True
 
-    # 5) Opciones genéricas; el runner mapeará según el modelo
-    opts: dict = {}
-    for p in parts[3:]:
-        k, _, v = p.partition(":")
-        k = k.strip().lower()
-        v = v.strip()
-        if k == "max":
-            try:
-                opts["max"] = int(v)
-            except Exception:
-                pass
-        elif k == "temp":
-            try:
-                opts["temp"] = float(v)
-            except Exception:
-                pass
-
     pr_number = issue.get("number")
     inst_id = (payload.get("installation") or {}).get("id")
-
-    # 6) Validaciones finales
     if not (owner and repo and pr_number and inst_id):
         return True
 
-    # 7) Placeholder y ejecución en background
+    # Placeholder y ejecución en background
     try:
         token = get_installation_token(inst_id)
         placeholder_id = post_comment(
@@ -258,13 +239,15 @@ def _handle_issue_comment(payload: dict) -> bool:
     except Exception:
         return True
 
+    # opts vacío: ya no aceptamos max/temp y el runner usa MAX_OUT fijo
     threading.Thread(
         target=_run_review_job,
-        args=(inst_id, owner, repo, pr_number, model, opts, placeholder_id),
+        args=(inst_id, owner, repo, pr_number, model, {}, placeholder_id),
         daemon=True,
     ).start()
 
     return True
+
 
 # -----------------------------
 # Dispatcher (función PADRE)

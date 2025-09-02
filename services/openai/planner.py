@@ -1,8 +1,9 @@
-# services/openai/planner.py
 from .tokens import count_tokens_messages
 from .models import MODELS, estimate_cost
 
 AVAILABLE = ["gpt-5", "gpt-5-mini", "gpt-4o-mini"]
+
+DEFAULT_MAX_OUT = 1500  # fijo
 
 def build_review_messages(pr_title: str, pr_body: str, file_diffs: list[dict], commits: list[dict]) -> list[dict]:
     changes_snippets = []
@@ -34,21 +35,21 @@ def build_review_messages(pr_title: str, pr_body: str, file_diffs: list[dict], c
         {"role": "user", "content": content},
     ]
 
-def make_price_table(messages: list[dict], max_out: int = 1200, cached_ratio: float = 0.0) -> tuple[int, dict]:
+def make_price_table(messages: list[dict], max_out: int = DEFAULT_MAX_OUT, cached_ratio: float = 0.0) -> tuple[int, dict]:
     tokens_in = count_tokens_messages(messages)
     prices = {}
     # mapea por id directo
-    for model_key in ["gpt-5", "gpt-5-mini", "gpt-4o-mini"]:
-        # busca clave interna en MODELS
-        k = [k for k, v in MODELS.items() if v["id"] == model_key][0]
-        prices[model_key] = estimate_cost(tokens_in, max_out, k, cached_ratio=cached_ratio)
+    for model_id in ["gpt-5", "gpt-5-mini", "gpt-4o-mini"]:
+        key = [k for k, v in MODELS.items() if v["id"] == model_id][0]
+        prices[model_id] = estimate_cost(tokens_in, max_out, key, cached_ratio=cached_ratio)
     return tokens_in, prices
 
 def render_budget_comment(tokens_in: int, prices: dict) -> str:
     return (
         "### 🤖 Presupuesto de análisis con IA (estimado)\n\n"
-        f"- Tokens de entrada (conservador): **{tokens_in:,}**\n\n"
-        "| Modelo | Est. costo |\n"
+        f"- Tokens de entrada (conservador): **{tokens_in:,}**\n"
+        f"- Límite de salida considerado: **{DEFAULT_MAX_OUT}** tokens\n\n"
+        "| Modelo | Costo estimado |\n"
         "|---|---|\n"
         f"| gpt-5 | ${prices['gpt-5']:.4f} |\n"
         f"| gpt-5-mini | ${prices['gpt-5-mini']:.4f} |\n"
@@ -56,9 +57,5 @@ def render_budget_comment(tokens_in: int, prices: dict) -> str:
         "Para ejecutar el análisis, comenta en este PR:\n\n"
         "- `/bot review gpt-5`\n"
         "- `/bot review gpt-5-mini`\n"
-        "- `/bot review gpt-4o-mini`\n\n"
-        "Parámetros opcionales: `max:<tokens_salida>` y `temp:<0..2>` (si el modelo lo soporta). Ejemplos:\n\n"
-        "- `/bot review gpt-5-mini max:1500`\n"
-        "- `/bot review gpt-4o-mini max:1200 temp:0.7`\n\n"
-        "Ayuda: `/bot models` o `/bot help`"
+        "- `/bot review gpt-4o-mini`\n"
     )

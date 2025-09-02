@@ -1,9 +1,8 @@
-# services/openai/tokens.py
 from __future__ import annotations
 import tiktoken
 
-# Encodings que probamos. Si alguno no existe en tu versión de tiktoken, lo omitimos.
 _ENCODING_CANDIDATES = ["o200k_base", "cl100k_base", "p50k_base", "r50k_base"]
+
 
 def _encodings():
     encs = []
@@ -12,9 +11,10 @@ def _encodings():
             encs.append(tiktoken.get_encoding(name))
         except Exception:
             pass
-    if not encs:  # fallback mínimo
+    if not encs:
         encs.append(tiktoken.get_encoding("cl100k_base"))
     return encs
+
 
 def count_tokens_text(text: str) -> int:
     text = text or ""
@@ -26,11 +26,8 @@ def count_tokens_text(text: str) -> int:
             continue
     return mx
 
+
 def count_tokens_messages(messages: list[dict]) -> int:
-    """
-    Estimación conservadora para chat-completions:
-    sumamos tokens del contenido y añadimos un pequeño overhead (+4 por mensaje, +2 final).
-    """
     total = 0
     for m in messages or []:
         role = m.get("role", "user") or ""

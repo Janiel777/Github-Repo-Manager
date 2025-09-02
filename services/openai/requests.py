@@ -1,13 +1,11 @@
-# services/openai/requests.py
 import os
-
 import httpx
-
 from openai import OpenAI
-from .models import MODELS
 
 _OPENAI_KEY = os.environ.get("OPENAI_API_KEY")
 _client: OpenAI | None = None
+
+DEFAULT_MAX_OUT = 1500  # fijo
 
 
 def get_client() -> OpenAI:
@@ -16,16 +14,9 @@ def get_client() -> OpenAI:
         api_key = os.environ.get("OPENAI_API_KEY")
         if not api_key:
             raise RuntimeError("Falta OPENAI_API_KEY")
-
-        # Timeout correcto para httpx:
-        # - default/read/write/pool = 60s, connect = 10s
+        # Timeout correcto para httpx (read/default 80s, connect 10s)
         timeout = httpx.Timeout(80.0, connect=10.0)
-
-        _client = OpenAI(
-            api_key=api_key,
-            timeout=timeout,
-            max_retries=2,  # opcional
-        )
+        _client = OpenAI(api_key=api_key, timeout=timeout, max_retries=2)
     return _client
 
 
@@ -33,7 +24,7 @@ def _build_prompt(owner: str, repo: str, pr_number: int,
                   files: list[dict], commits: list[dict]) -> list[dict]:
     # Limita tamaño de diffs para no disparar tokens
     parts = []
-    remaining = 20000  # caracteres de parches (aprox) para el prompt
+    remaining = 20000  # aprox caracteres de parches para el prompt
     for f in files:
         name = f.get("filename", "")
         patch = f.get("patch", "") or ""
@@ -44,9 +35,7 @@ def _build_prompt(owner: str, repo: str, pr_number: int,
         remaining -= len(take)
         parts.append(f"### {name}\n```diff\n{take}\n```")
 
-    commits_md = "\n".join(
-        f"- {c.get('sha', '')[:7]}: {c.get('message', '')}" for c in commits
-    )
+    commits_md = "\n".join(f"- {c.get('sha', '')[:7]}: {c.get('message', '')}" for c in commits)
 
     user_content = (
             f"Repository: {owner}/{repo}\nPR: #{pr_number}\n\n"
@@ -54,7 +43,7 @@ def _build_prompt(owner: str, repo: str, pr_number: int,
             "Changes by file:\n" + "\n\n".join(parts)
     )
 
-    messages = [
+    return [
         {
             "role": "system",
             "content": (
@@ -68,16 +57,14 @@ def _build_prompt(owner: str, repo: str, pr_number: int,
         },
         {"role": "user", "content": user_content},
     ]
-    return messages
 
 
 def review_pull_request(model: str, owner: str, repo: str, pr_number: int,
-                        files: list[dict], commits: list[dict], opts: dict) -> str:
+                        files: list[dict], commits: list[dict], _opts_ignored: dict) -> str:
     """
-    Ejecuta la revisión con el modelo indicado.
-    Modelos esperados: 'gpt-5', 'gpt-5-mini', 'gpt-4o-mini'
-    - gpt-5 / gpt-5-mini: usar max_output_tokens (no temperature).
-    - gpt-4o-mini: usar temperature (opcional) y max_tokens (opcional).
+    Ejecuta la revisión con el modelo indicado (sin parámetros de usuario).
+    - gpt-5 / gpt-5-mini: usar max_output_tokens=DEFAULT_MAX_OUT (no temperature).
+    - gpt-4o-mini: usar max_tokens=DEFAULT_MAX_OUT (temperature por defecto del modelo).
     """
     client = get_client()
     messages = _build_prompt(owner, repo, pr_number, files, commits)
@@ -88,37 +75,11 @@ def review_pull_request(model: str, owner: str, repo: str, pr_number: int,
 
     kwargs = dict(model=model, messages=messages)
 
-    # Parametrización por modelo
     if model.startswith("gpt-5"):
-        # max_output_tokens (si el usuario pasó 'max' o 'max:salida')
-        if "max" in opts:
-            try:
-                kwargs["max_output_tokens"] = int(opts["max"])
-            except Exception:
-                pass
-        elif "max:salida" in opts:
-            try:
-                kwargs["max_output_tokens"] = int(opts["max:salida"])
-            except Exception:
-                pass
-        # temperatura: dejar por defecto para gpt-5
+        kwargs["max_output_tokens"] = DEFAULT_MAX_OUT
     else:
         # gpt-4o-mini
-        if "temp" in opts:
-            try:
-                kwargs["temperature"] = float(opts["temp"])
-            except Exception:
-                pass
-        if "temp:0.2" in opts:  # por si llega con formato raro
-            try:
-                kwargs["temperature"] = float(opts["temp:0.2"])
-            except Exception:
-                pass
-        if "max" in opts:
-            try:
-                kwargs["max_tokens"] = int(opts["max"])
-            except Exception:
-                pass
+        kwargs["max_tokens"] = DEFAULT_MAX_OUT
 
     resp = client.chat.completions.create(**kwargs)
     return resp.choices[0].message.content or ""
