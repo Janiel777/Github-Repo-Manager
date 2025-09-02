@@ -76,41 +76,66 @@ def _extract_text(choice) -> str:
     return (ref or "").strip()
 
 def review_pull_request(model: str, owner: str, repo: str, pr_number: int,
-                        files: list[dict], commits: list[dict], _opts_ignored: dict) -> str:
+                        files: list[dict], commits: list[dict], opts: dict) -> str:
+    """
+    Ejecuta la revisión con el modelo indicado.
+    Modelos esperados: 'gpt-5', 'gpt-5-mini', 'gpt-4o-mini'
+    - gpt-5 / gpt-5-mini: usar max_completion_tokens (no temperature).
+    - gpt-4o-mini: usar temperature (opcional) y max_tokens (opcional).
+    """
     client = get_client()
     messages = _build_prompt(owner, repo, pr_number, files, commits)
 
-    m = (model or "").strip()
-    if m == "gpt-5":
-        kwargs = {
-            "model": "gpt-5",
-            "messages": messages,
-            "max_completion_tokens": DEFAULT_MAX_OUT,
-            "response_format": {"type": "text"},
-        }
-    elif m == "gpt-5-mini":
-        kwargs = {
-            "model": "gpt-5-mini",
-            "messages": messages,
-            "max_completion_tokens": DEFAULT_MAX_OUT,
-            "response_format": {"type": "text"},
-        }
-    elif m == "gpt-4o-mini":
-        kwargs = {
-            "model": "gpt-4o-mini",
-            "messages": messages,
-            "max_tokens": DEFAULT_MAX_OUT,
-            "response_format": {"type": "text"},
-        }
-    else:
+    model = (model or "").strip()
+    if model not in {"gpt-5", "gpt-5-mini", "gpt-4o-mini"}:
         raise ValueError(f"Modelo no soportado: {model}")
 
+    # Siempre pedimos texto plano para evitar contenido vacío por "content parts"
+    kwargs = dict(
+        model=model,
+        messages=messages,
+        response_format={"type": "text"},
+    )
+
+    # Parametrización por modelo
+    if model.startswith("gpt-5"):
+        # 👉 clave correcta para gpt-5/gpt-5-mini
+        if "max" in opts:
+            try:
+                kwargs["max_completion_tokens"] = int(opts["max"])
+            except Exception:
+                pass
+        elif "max:salida" in opts:
+            try:
+                kwargs["max_completion_tokens"] = int(opts["max:salida"])
+            except Exception:
+                pass
+        # no setear temperature: usar la del modelo
+    else:
+        # gpt-4o-mini
+        if "temp" in opts:
+            try:
+                kwargs["temperature"] = float(opts["temp"])
+            except Exception:
+                pass
+        if "max" in opts:
+            try:
+                kwargs["max_tokens"] = int(opts["max"])
+            except Exception:
+                pass
+
     resp = client.chat.completions.create(**kwargs)
-    text = _extract_text(resp.choices[0])
 
-    # Retry rápido si quedó vacío (a veces por filtro o formato)
-    if not text:
-        resp = client.chat.completions.create(**kwargs)
-        text = _extract_text(resp.choices[0])
+    # Extrae texto de forma robusta (string o "content parts")
+    msg = resp.choices[0].message
+    content = msg.content
+    if not content and isinstance(msg.content, list):
+        try:
+            content = "".join(
+                (part.get("text", "") if isinstance(part, dict) else str(part))
+                for part in msg.content
+            ).strip()
+        except Exception:
+            content = ""
 
-    return text
+    return content or ""
