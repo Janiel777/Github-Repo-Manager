@@ -1,0 +1,70 @@
+name: Deploy to Elastic Beanstalk
+
+on:
+  # 1) Se ejecuta automáticamente cuando hay push a main
+  push:
+    branches: [ "main" ]
+  # 2) Permite lanzarlo manualmente desde la pestaña "Actions"
+  workflow_dispatch:
+
+# Evita despliegues solapados: si pusheas varias veces, cancela el anterior
+concurrency:
+  group: deploy-eb
+  cancel-in-progress: true
+
+permissions:
+  id-token: write   # necesario para OIDC
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # (Opcional) Asegura que el zip salga consistente, útil si usas Python
+      - name: Show Python version
+        run: python3 --version
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      # Empaquetar el repo como .zip para EB (Procfile y all el root del proyecto)
+      # Excluimos .git y la carpeta .github del workflow
+      - name: Create artifact zip
+        run: |
+          ZIP_NAME="${GITHUB_SHA}.zip"
+          echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
+          zip -r "$ZIP_NAME" . -x ".git/*" ".github/*"
+
+      # Subir el .zip a tu bucket S3
+      - name: Upload artifact to S3
+        run: |
+          aws s3 cp "${{ env.ZIP_NAME }}" "s3://${{ secrets.S3_BUCKET }}/${{ env.ZIP_NAME }}"
+
+      # Crear una nueva "Application Version" en EB usando el zip del S3
+      - name: Create EB application version
+        run: |
+          aws elasticbeanstalk create-application-version \
+            --application-name "${{ secrets.EB_APP_NAME }}" \
+            --version-label "${GITHUB_SHA}" \
+            --source-bundle S3Bucket="${{ secrets.S3_BUCKET }}",S3Key="${{ env.ZIP_NAME }}"
+
+      # Apuntar el entorno a esa nueva versión
+      - name: Update EB environment
+        run: |
+          aws elasticbeanstalk update-environment \
+            --environment-name "${{ secrets.EB_ENV_NAME }}" \
+            --version-label "${GITHUB_SHA}"
+
+      # (Opcional) Esperar a que el update termine y fallar si EB reporta error
+      - name: Wait for environment update to finish
+        run: |
+          aws elasticbeanstalk wait environment-updated \
+            --environment-names "${{ secrets.EB_ENV_NAME }}"
+          echo "Environment update finished."
